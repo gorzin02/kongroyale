@@ -25,6 +25,13 @@ jobs:
       - name: Build web assets
         run: VITE_KR_PLAYTEST=0 npm run build
 
+      - name: Install and configure Capacitor
+        run: |
+          npm install @capacitor/core @capacitor/cli @capacitor/ios
+          if [ ! -f "capacitor.config.json" ] && [ ! -f "capacitor.config.ts" ]; then
+            npx cap init "Kong Royale" "com.kongroyale.app" --web-dir=dist
+          fi
+
       - name: Add and sync iOS platform
         run: |
           npx cap add ios
