@@ -1,68 +1,12 @@
 const isRealTouchDevice =
+  Boolean((window as unknown as { __KR_IS_TOUCH__?: boolean }).__KR_IS_TOUCH__) ||
   'ontouchstart' in window ||
   navigator.maxTouchPoints > 0 ||
-  /iPhone|iPad|iPod|Android/i.test(navigator.userAgent) ||
   new URLSearchParams(window.location.search).has('touch');
 
 let virtualPointerLocked = false;
 
 if (isRealTouchDevice) {
-  // ۱. جعل مشخصات مرورگر به عنوان دسکتاپ ویندوز قبل از اجرای کدهای بازی
-  try {
-    Object.defineProperty(navigator, 'userAgent', {
-      get: () =>
-        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
-      configurable: true,
-    });
-    Object.defineProperty(navigator, 'platform', {
-      get: () => 'Win32',
-      configurable: true,
-    });
-    Object.defineProperty(navigator, 'maxTouchPoints', {
-      get: () => 0,
-      configurable: true,
-    });
-  } catch {
-    // ignore if non-configurable
-  }
-
-  try {
-    delete (window as unknown as Record<string, unknown>).ontouchstart;
-  } catch {
-    // ignore
-  }
-
-  // ۲. دور زدن بررسی‌های CSS/JS مربوط به نمایشگر لمسی و عرض کم صفحه
-  if (typeof window.matchMedia === 'function') {
-    const origMatchMedia = window.matchMedia.bind(window);
-    window.matchMedia = (query: string): MediaQueryList => {
-      const mql = origMatchMedia(query);
-      const q = query.toLowerCase();
-      const isMobileQuery =
-        q.includes('pointer: coarse') ||
-        q.includes('any-pointer: coarse') ||
-        q.includes('hover: none') ||
-        q.includes('any-hover: none') ||
-        q.includes('max-width');
-      const isDesktopQuery =
-        q.includes('pointer: fine') ||
-        q.includes('hover: hover');
-
-      if (isMobileQuery || isDesktopQuery) {
-        const forcedMatches = isMobileQuery ? false : true;
-        return new Proxy(mql, {
-          get(target, prop) {
-            if (prop === 'matches') return forcedMatches;
-            const val = Reflect.get(target, prop, target);
-            return typeof val === 'function' ? val.bind(target) : val;
-          },
-        });
-      }
-      return mql;
-    };
-  }
-
-  // ۳. شبیه‌سازی Pointer Lock در سافاری آیفون برای کار کردن چرخش دوربین
   const origLockDesc = Object.getOwnPropertyDescriptor(Document.prototype, 'pointerLockElement');
   Object.defineProperty(document, 'pointerLockElement', {
     configurable: true,
@@ -82,18 +26,9 @@ if (isRealTouchDevice) {
 }
 
 function initTouchControls(): void {
-  // تنظیم عرض صفحه روی ۱۰۲۴ پیکسل تا منوهای دسکتاپ بازی بدون به هم ریختگی نمایش داده شوند
-  let meta = document.querySelector('meta[name="viewport"]') as HTMLMetaElement | null;
-  if (!meta) {
-    meta = document.createElement('meta');
-    meta.name = 'viewport';
-    document.head.appendChild(meta);
-  }
-  meta.content = 'width=1024, initial-scale=1, maximum-scale=1, user-scalable=no';
-
   // حذف خودکار هرگونه بنر یا صفحه مزاحم که پیام Desktop Only نمایش می‌دهد
   const hideDesktopOnlyBanners = () => {
-    const elements = document.querySelectorAll('div, section, aside, p, h1, h2, h3');
+    const elements = document.querySelectorAll('div, section, aside, p, h1, h2, h3, span');
     elements.forEach((node) => {
       const el = node as HTMLElement;
       if (
@@ -109,7 +44,7 @@ function initTouchControls(): void {
       if (
         text.length > 0 &&
         text.length < 300 &&
-        /desktop\s*only|on\s+a\s+desktop|desktop\s+browser/i.test(text)
+        /desktop\s*only|desktop\s*browser|on\s+a\s+desktop|pc\s*only|not\s+supported\s+on\s+mobile|keyboard\s+and\s+mouse/i.test(text)
       ) {
         el.style.setProperty('display', 'none', 'important');
       }
@@ -140,7 +75,6 @@ function initTouchControls(): void {
     window.dispatchEvent(new MouseEvent(type, { button, bubbles: true, cancelable: true }));
   }
 
-  // ساخت لایه اصلی دکمه‌های لمسی (HUD)
   const hud = document.createElement('div');
   hud.id = 'kr-touch-hud';
   hud.style.cssText =
@@ -153,6 +87,8 @@ function initTouchControls(): void {
   hud.appendChild(lookZone);
 
   let lookTouchId: number | null = null;
+  let startX = 0;
+  let startY = 0;
   let lastX = 0;
   let lastY = 0;
   const SENSITIVITY = 1.6;
@@ -164,8 +100,8 @@ function initTouchControls(): void {
       if (lookTouchId === null && e.changedTouches.length > 0) {
         const t = e.changedTouches[0];
         lookTouchId = t.identifier;
-        lastX = t.clientX;
-        lastY = t.clientY;
+        startX = lastX = t.clientX;
+        startY = lastY = t.clientY;
         virtualPointerLocked = true;
       }
     },
@@ -195,8 +131,17 @@ function initTouchControls(): void {
 
   const stopLook = (e: TouchEvent) => {
     for (let i = 0; i < e.changedTouches.length; i++) {
-      if (e.changedTouches[i].identifier === lookTouchId) {
+      const t = e.changedTouches[i];
+      if (t.identifier === lookTouchId) {
         lookTouchId = null;
+        // اگر کاربر فقط ضربه کوتاه زده (مثلاً روی دکمه منو)، کلیک را به المان زیرین منتقل کن
+        if (Math.hypot(t.clientX - startX, t.clientY - startY) < 10) {
+          hud.style.display = 'none';
+          const under = document.elementFromPoint(t.clientX, t.clientY) as HTMLElement | null;
+          hud.style.display = '';
+          const clickable = under?.closest('button, a, input, select, [role="button"]') as HTMLElement | null;
+          if (clickable) clickable.click();
+        }
       }
     }
   };
@@ -206,10 +151,10 @@ function initTouchControls(): void {
   // جوی‌استیک حرکت (پایین سمت چپ)
   const joyBase = document.createElement('div');
   joyBase.style.cssText =
-    'position:absolute;left:36px;bottom:36px;width:140px;height:140px;border-radius:50%;background:rgba(255,255,255,0.16);border:2px solid rgba(255,255,255,0.38);pointer-events:auto;';
+    'position:absolute;left:36px;bottom:36px;width:145px;height:145px;border-radius:50%;background:rgba(255,255,255,0.16);border:2px solid rgba(255,255,255,0.38);pointer-events:auto;';
   const joyKnob = document.createElement('div');
   joyKnob.style.cssText =
-    'position:absolute;left:41px;top:41px;width:58px;height:58px;border-radius:50%;background:rgba(255,255,255,0.68);pointer-events:none;';
+    'position:absolute;left:43px;top:43px;width:58px;height:58px;border-radius:50%;background:rgba(255,255,255,0.68);pointer-events:none;';
   joyBase.appendChild(joyKnob);
   hud.appendChild(joyBase);
 
@@ -315,22 +260,22 @@ function initTouchControls(): void {
     return btn;
   }
 
-  createBtn('FIRE', 'right:36px;bottom:48px', 86, () => sendMouseButton(0, true), () => sendMouseButton(0, false));
+  createBtn('FIRE', 'right:36px;bottom:48px', 88, () => sendMouseButton(0, true), () => sendMouseButton(0, false));
 
   let aiming = false;
-  const aimBtn = createBtn('AIM', 'right:138px;bottom:125px', 64, () => {
+  const aimBtn = createBtn('AIM', 'right:142px;bottom:128px', 64, () => {
     aiming = !aiming;
     sendMouseButton(2, aiming);
     aimBtn.style.borderColor = aiming ? '#ffcc00' : 'rgba(255,255,255,0.45)';
   });
 
-  createBtn('JUMP', 'right:42px;bottom:152px', 66, () => setKey('Space', ' ', true), () => setKey('Space', ' ', false));
-  createBtn('USE', 'right:138px;bottom:42px', 62, () => setKey('KeyE', 'e', true), () => setKey('KeyE', 'e', false));
-  createBtn('RLD', 'right:215px;bottom:42px', 58, () => setKey('KeyR', 'r', true), () => setKey('KeyR', 'r', false));
-  createBtn('CROUCH', 'right:215px;bottom:112px', 58, () => setKey('KeyC', 'c', true), () => setKey('KeyC', 'c', false));
-  createBtn('BOMB', 'left:195px;bottom:42px', 58, () => setKey('KeyG', 'g', true), () => setKey('KeyG', 'g', false));
+  createBtn('JUMP', 'right:42px;bottom:154px', 68, () => setKey('Space', ' ', true), () => setKey('Space', ' ', false));
+  createBtn('USE', 'right:142px;bottom:42px', 64, () => setKey('KeyE', 'e', true), () => setKey('KeyE', 'e', false));
+  createBtn('RLD', 'right:220px;bottom:42px', 58, () => setKey('KeyR', 'r', true), () => setKey('KeyR', 'r', false));
+  createBtn('CROUCH', 'right:220px;bottom:112px', 58, () => setKey('KeyC', 'c', true), () => setKey('KeyC', 'c', false));
+  createBtn('BOMB', 'left:200px;bottom:42px', 58, () => setKey('KeyG', 'g', true), () => setKey('KeyG', 'g', false));
 
-  createBtn('GUN', 'right:36px;top:85px', 60, () => {
+  createBtn('GUN', 'right:36px;top:85px', 62, () => {
     weaponSlot = (weaponSlot % 5) + 1;
     const code = `Digit${weaponSlot}`;
     const key = String(weaponSlot);
