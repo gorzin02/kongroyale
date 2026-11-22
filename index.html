@@ -21,7 +21,7 @@
       localStorage.setItem('kr.flags', flags.toString());
     } catch (e) {}
 
-    // ۲. قفل کردن تراکم پیکسلی روی 1 برای کاهش شدید مصرف رم گرافیکی و جلوگیری از کرش iOS
+    // ۲. قفل کردن تراکم پیکسلی روی 1 برای کاهش شدید مصرف رم گرافیکی در iPhone 13
     try {
       Object.defineProperty(window, 'devicePixelRatio', {
         get: function () { return 1; },
@@ -29,13 +29,13 @@
       });
     } catch (e) {}
 
-    // ۳. جعل مشخصات مرورگر دسکتاپ و محدود کردن پردازش موازی برای جلوگیری از جهش ناگهانی رم
+    // ۳. جعل مشخصات مرورگر دسکتاپ و محدود کردن پردازش موازی به ۱ ترد برای جلوگیری از تکثیر رم
     var navOverrides = {
       userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
       platform: 'Win32',
       vendor: 'Google Inc.',
       maxTouchPoints: 0,
-      hardwareConcurrency: 2
+      hardwareConcurrency: 1
     };
     for (var key in navOverrides) {
       try {
@@ -44,7 +44,44 @@
       } catch (e) {}
     }
 
-    // ۴. بهینه‌سازی اجباری WebGL (خاموش کردن MSAA و محدود کردن ابعاد سایه و تکسچر به 1024 پیکسل)
+    // ۴. جلوگیری از اشغال چند صد مگابایت رم توسط بافرهای صوتی فشرده‌نشده هنگام لود
+    var AC = window.AudioContext || window.webkitAudioContext;
+    if (AC && AC.prototype && AC.prototype.decodeAudioData) {
+      AC.prototype.decodeAudioData = function (buf, ok) {
+        var tiny = this.createBuffer(1, 1, 22050);
+        if (typeof ok === 'function') setTimeout(function () { ok(tiny); }, 0);
+        return Promise.resolve(tiny);
+      };
+    }
+
+    // ۵. بهینه‌سازی حداکثری WebGL (کاهش ابعاد تکسچرها به ۵۱۲ پیکسل و حذف بافرهای سنگین MSAA)
+    var downscaleCanvas = null;
+    var downscaleCtx = null;
+    function shrinkSource(src) {
+      if (!src || typeof src !== 'object') return src;
+      if (ArrayBuffer.isView(src)) return src;
+      var w = src.videoWidth || src.naturalWidth || src.width || 0;
+      var h = src.videoHeight || src.naturalHeight || src.height || 0;
+      var MAX_DIM = 512;
+      if (w > MAX_DIM || h > MAX_DIM) {
+        var scale = MAX_DIM / Math.max(w, h);
+        var nw = Math.max(1, Math.round(w * scale));
+        var nh = Math.max(1, Math.round(h * scale));
+        if (!downscaleCanvas) {
+          downscaleCanvas = document.createElement('canvas');
+          downscaleCtx = downscaleCanvas.getContext('2d');
+        }
+        downscaleCanvas.width = nw;
+        downscaleCanvas.height = nh;
+        if (downscaleCtx) {
+          downscaleCtx.clearRect(0, 0, nw, nh);
+          downscaleCtx.drawImage(src, 0, 0, nw, nh);
+          return downscaleCanvas;
+        }
+      }
+      return src;
+    }
+
     var origGetContext = HTMLCanvasElement.prototype.getContext;
     HTMLCanvasElement.prototype.getContext = function (type, attrs) {
       if (type === 'webgl' || type === 'webgl2' || type === 'experimental-webgl') {
@@ -56,13 +93,37 @@
         var gl = origGetContext.call(this, type, safeAttrs);
         if (gl && !gl.__krPatched) {
           gl.__krPatched = true;
+
           var origGetParam = gl.getParameter.bind(gl);
           gl.getParameter = function (pname) {
             if (pname === 0x0D33 || pname === 0x84E8) {
               var realMax = origGetParam(pname);
-              return Math.min(realMax || 1024, 1024);
+              return Math.min(realMax || 512, 512);
             }
+            if (pname === 0x8D57) return 0;
             return origGetParam(pname);
+          };
+
+          if (typeof gl.renderbufferStorageMultisample === 'function') {
+            gl.renderbufferStorageMultisample = function (target, samples, internalformat, width, height) {
+              return gl.renderbufferStorage(target, internalformat, width, height);
+            };
+          }
+
+          var origTexImage2D = gl.texImage2D.bind(gl);
+          gl.texImage2D = function () {
+            var args = Array.prototype.slice.call(arguments);
+            if (args.length === 6 && args[1] === 0) {
+              args[5] = shrinkSource(args[5]);
+            } else if (args.length >= 9 && args[1] === 0 && args[8] && typeof args[8] === 'object' && !ArrayBuffer.isView(args[8])) {
+              var shrunk = shrinkSource(args[8]);
+              if (shrunk !== args[8]) {
+                args[3] = shrunk.width;
+                args[4] = shrunk.height;
+                args[8] = shrunk;
+              }
+            }
+            return origTexImage2D.apply(gl, args);
           };
         }
         return gl;
@@ -70,7 +131,7 @@
       return origGetContext.call(this, type, attrs);
     };
 
-    // ۵. دور زدن بررسی‌های CSS/JS مربوط به نمایشگر لمسی
+    // ۶. دور زدن بررسی‌های CSS/JS مربوط به نمایشگر لمسی
     if (window.matchMedia) {
       var origMM = window.matchMedia.bind(window);
       window.matchMedia = function (q) {
@@ -103,7 +164,6 @@
 <meta name="twitter:title" content="KONG ROYALE" />
 <meta name="twitter:description" content="A 50-player banana battle royale in the browser. Solo and trios, resurgence, one gorgeous island." />
 <link rel="icon" href="data:," />
-<!-- the loading screen's first frame: its art (the 4K copy only where the CSS below swaps to it) and the Toon type -->
 <link rel="preload" href="/assets/ui/loading.webp" as="image" media="(max-width: 2599.98px) and (max-resolution: 1.49dppx), (max-width: 1699.98px)" />
 <link rel="preload" href="/assets/ui/loading-4k.webp" as="image" media="(min-width: 2600px), (min-resolution: 1.5dppx) and (min-width: 1700px)" />
 <link rel="preload" href="/assets/ui/toon/lilita-one-latin.woff2" as="font" type="font/woff2" crossorigin />
@@ -112,20 +172,12 @@
   html, body { margin: 0; height: 100%; background: #0e6fa8; overflow: hidden; overscroll-behavior: none; }
   #c { display: block; width: 100vw; height: 100vh; touch-action: none; outline: none; }
   #ui { position: fixed; inset: 0; pointer-events: none; }
-  /* the game's canvas lettering (blimp, lobby, helipad, tuk-tuk, map): the inline script below loads both while the
-     island builds, so they are in place before anything paints with them */
   @font-face { font-family: 'KR Block'; font-weight: 300 900; font-display: block; src: url('/assets/ui/rubik-var-latin.woff2') format('woff2'); }
   @font-face { font-family: 'Barlow Condensed'; font-weight: 800; font-display: block; src: url('/assets/ui/barlow-condensed-800.woff2') format('woff2'); }
-  /* the Toon type (client/src/ui/toon.ts declares the same faces once the modules load) */
   @font-face { font-family: 'Lilita One'; font-style: normal; font-weight: 400; font-display: block; src: url('/assets/ui/toon/lilita-one-latin.woff2') format('woff2'); }
   @font-face { font-family: 'Nunito'; font-style: normal; font-weight: 200 1000; font-display: block; src: url('/assets/ui/toon/nunito-var-latin.woff2') format('woff2'); }
 
-  /* ---- loading screen (Toon style). Shown only for the
-     game (no ?view / ?cam / ?shot); it fades out when the world is built, textures are in and the title has settled
-     (window.__kr.ready). It paints before any module loads, so client/src/ui/toon.ts is not injected yet: the tokens it
-     needs are declared here, scoped to #kr-loading. This block is the one place on the screen with raw values. */
   #kr-loading {
-    /* the Toon design tokens, verbatim */
     --kong-bg: #071422; --kong-surface-raised: #17405A; --kong-outline: #04101A;
     --kong-text: #FFF8E7; --kong-text-muted: #A9C6DA; --kong-accent: #FFD21A; --kong-accent-light: #FFE45C;
     --kong-accent-shade: #F2B800; --kong-on-accent: #04101A; --kong-danger: #FF4D5E; --kong-focus: #FFFFFF;
@@ -133,18 +185,14 @@
     --kong-gradient-primary: linear-gradient(180deg, #FFE45C 0%, #FFD21A 55%, #F2B800 100%);
     --kong-motion-fast: 120ms; --kong-motion-standard: 180ms; --kong-motion-slow: 240ms;
     --kong-ease-spring: cubic-bezier(.34, 1.56, .64, 1);
-    /* toon.ts additions to the tokens (TOON.rule / disabled / disabledText, the panel gradient, the hover gradient, the scrim) */
     --kong-rule: #1D4763; --kong-disabled: #2A4152; --kong-disabled-text: #8FA8B8;
     --kong-gradient-primary-hover: linear-gradient(180deg, #FFEA7A 0%, #FFD83A 55%, #F5C000 100%);
     --kong-gradient-panel: linear-gradient(180deg, #12344B, #0E2A3D);
     --kong-scrim: rgba(4, 16, 26, 0.72);
-    /* the Toon design's loading screen */
     --kong-ld-shade: linear-gradient(180deg, transparent 50%, rgba(7, 20, 34, .8) 78%, rgba(7, 20, 34, .97));
     --kong-ld-glass: rgba(14, 42, 61, .92);
     --kong-ld-underline: rgba(238, 234, 223, .4);
     --kong-ld-dash: rgba(238, 234, 223, .25);
-    /* sizes: token px on the 1920×1080 canvas, scaled through --tu like toon.ts T(n) (a 0.5 floor keeps a short
-       landscape phone legible) */
     --tu: max(0.5px, min(calc(100vh / 1080), calc(100vw / 1920)));
     --kong-outline-sm: calc(3 * var(--tu)); --kong-outline-md: calc(4 * var(--tu));
     --kong-drop-pill: 0 calc(4 * var(--tu)) 0 var(--kong-outline);
@@ -167,22 +215,18 @@
   #kr-loading :focus-visible { outline: var(--kong-focus-width) solid var(--kong-focus); outline-offset: var(--kong-focus-offset); }
   #kr-loading :focus:not(:focus-visible) { outline: none; }
 
-  /* full-bleed art with the slow drift (still under reduced motion) */
   #kr-loading .bg { position: absolute; inset: -2%; background: var(--kong-bg) url('/assets/ui/loading.webp') center / cover no-repeat;
     animation: kr-drift 40s ease-in-out infinite alternate; }
-  /* 4K / hi-dpi screens: a 3840 lanczos-upscaled, lightly sharpened copy (the browser's bilinear 1.5x upscale was soft) */
   @media (min-width: 2600px), (min-resolution: 1.5dppx) and (min-width: 1700px) { #kr-loading .bg { background-image: url('/assets/ui/loading-4k.webp'); } }
   @keyframes kr-drift { from { transform: scale(1.0) translate(0, 0); } to { transform: scale(1.06) translate(-1.2%, -0.8%); } }
   #kr-loading .shade { position: absolute; inset: 0; background: var(--kong-ld-shade); }
 
-  /* brand: the KONG ROYALE lockup, 3px outline + one hard 6px drop (toon.ts .tn-logo) */
   #kr-loading .logo { position: absolute; left: calc(64 * var(--tu)); top: calc(48 * var(--tu)); width: calc(320 * var(--tu)); height: auto;
     -webkit-user-drag: none; pointer-events: none;
     filter: drop-shadow(calc(3 * var(--tu)) 0 0 var(--kong-outline)) drop-shadow(calc(-3 * var(--tu)) 0 0 var(--kong-outline))
       drop-shadow(0 calc(3 * var(--tu)) 0 var(--kong-outline)) drop-shadow(0 calc(-3 * var(--tu)) 0 var(--kong-outline))
       drop-shadow(0 calc(6 * var(--tu)) 0 var(--kong-outline)); }
 
-  /* bottom-left: mode line, headline, phase; the bar with its percentage; Learn controls */
   #kr-loading .dock { position: absolute; inset: 0; }
   #kr-loading .copy { position: absolute; left: calc(64 * var(--tu)); right: calc(560 * var(--tu)); bottom: calc(150 * var(--tu));
     display: grid; justify-items: start; gap: calc(14 * var(--tu)); }
@@ -200,7 +244,6 @@
     color: var(--kong-accent); }
   #kr-loading .bar { position: absolute; inset: 0; overflow: hidden; border-radius: var(--kong-radius-pill); background: var(--kong-outline);
     border: var(--kong-outline-sm) solid var(--kong-outline); box-shadow: var(--kong-drop-pill); }
-  /* the fill is a full-width pill moved in from the left (transform only: it runs on the compositor and keeps its round end) */
   #kr-loading .bar i { position: absolute; inset: 0; display: block; border-radius: var(--kong-radius-pill);
     background: linear-gradient(180deg, var(--kong-accent-light), var(--kong-accent-shade)); transform: translateX(-100%); will-change: transform; }
   #kr-loading .learn { position: absolute; left: calc(64 * var(--tu)); bottom: calc(40 * var(--tu)); display: inline-flex; align-items: center; gap: calc(12 * var(--tu));
@@ -213,7 +256,6 @@
   #kr-loading .learn:hover span { border-bottom-color: currentColor; }
   #kr-loading .learn:active { transform: translateY(calc(2 * var(--tu))); }
 
-  /* bottom-right: the DROP TIP panel, one rotating tip with keycaps from the player's bindings */
   #kr-loading .tip { position: absolute; right: calc(64 * var(--tu)); bottom: calc(76 * var(--tu)); width: calc(420 * var(--tu));
     display: grid; gap: calc(10 * var(--tu)); padding: calc(22 * var(--tu)) calc(26 * var(--tu)); cursor: pointer;
     background: var(--kong-ld-glass); border: var(--kong-outline-md) solid var(--kong-outline); border-radius: var(--kong-radius-card); box-shadow: var(--kong-drop-card);
@@ -229,7 +271,6 @@
   #kr-loading .dashes { display: flex; gap: calc(6 * var(--tu)); }
   #kr-loading .dashes i { width: calc(18 * var(--tu)); height: max(2px, calc(2 * var(--tu))); background: var(--kong-ld-dash); transition: background var(--kong-motion-standard); }
   #kr-loading .dashes i.on { background: var(--kong-accent); }
-  /* keycaps (toon.ts .tn-key): ivory caps, yellow accent, red when unbound */
   #kr-loading .key { display: inline-flex; align-items: center; justify-content: center; height: calc(34 * var(--tu)); min-width: calc(34 * var(--tu));
     padding: 0 calc(8 * var(--tu)); border-radius: var(--kong-radius-key); border: var(--kong-outline-sm) solid var(--kong-outline); box-shadow: var(--kong-drop-pill);
     background: var(--kong-text); color: var(--kong-outline); font: inherit; font-weight: 900; font-size: max(11px, calc(17 * var(--tu))); line-height: 1;
@@ -238,7 +279,6 @@
   #kr-loading .key.unbound { background: var(--kong-danger); color: var(--kong-text); }
   @keyframes kr-ld-swap { from { opacity: 0; } }
 
-  /* dialogs (toon.ts .tn-dialog): the controls card and the boot-failure card */
   #kr-loading .scrim { position: absolute; inset: 0; z-index: 2; display: grid; place-items: center; padding: calc(48 * var(--tu)); background: var(--kong-scrim); }
   #kr-loading .card { display: grid; gap: calc(20 * var(--tu)); width: min(calc(880 * var(--tu)), 100%); max-height: 100%; overflow: auto; padding: calc(40 * var(--tu));
     background: var(--kong-gradient-panel); color: var(--kong-text); border: var(--kong-outline-md) solid var(--kong-outline); border-radius: var(--kong-radius-dialog);
@@ -257,8 +297,6 @@
     font-weight: 900; font-size: max(11px, calc(16 * var(--tu))); color: var(--kong-text-muted); }
   #kr-loading .acts { display: flex; align-items: center; justify-content: flex-end; gap: calc(16 * var(--tu)); margin-top: calc(12 * var(--tu)); }
   #kr-loading .acts .fine { margin-right: auto; }
-  /* primary button (the Toon design's dialog button; toon.ts .tn-btn--primary): yellow gradient, 4px outline, 6px drop;
-     hover lifts, press squashes */
   #kr-loading .btn { appearance: none; display: inline-flex; align-items: center; justify-content: center; gap: calc(12 * var(--tu)); flex: none;
     min-height: calc(56 * var(--tu)); padding: 0 calc(24 * var(--tu)); border-radius: var(--kong-radius-button);
     border: var(--kong-outline-md) solid var(--kong-outline); box-shadow: var(--kong-drop-button); background: var(--kong-gradient-primary); color: var(--kong-on-accent);
@@ -268,11 +306,9 @@
   #kr-loading .btn:active { transform: translateY(calc(5 * var(--tu))); box-shadow: var(--kong-drop-pressed); transition-duration: 60ms; }
   #kr-loading .btn[disabled] { background: var(--kong-disabled); color: var(--kong-disabled-text); cursor: default; transform: none; box-shadow: var(--kong-drop-button); }
   #kr-loading .failure .card { width: min(calc(680 * var(--tu)), 100%); }
-  /* a genuine boot failure (the game code didn't load, the boot threw or timed out): a reload card, never a broken title */
   #kr-loading.failed .bg { animation: none; }
   #kr-loading.failed .logo, #kr-loading.failed .dock, #kr-loading.failed .guide { display: none; }
 
-  /* reduced motion (the saved Accessibility setting, read below, or the OS): no drift, pops or swaps */
   #kr-loading.calm .bg, #kr-loading.calm .card { animation: none; }
   #kr-loading.calm { --kong-motion-fast: 0ms; --kong-motion-standard: 0ms; --kong-motion-slow: 0ms; --kong-ease-spring: ease-out; }
   @media (prefers-reduced-motion: reduce) {
@@ -280,7 +316,6 @@
     #kr-loading { --kong-motion-fast: 0ms; --kong-motion-standard: 0ms; --kong-motion-slow: 0ms; --kong-ease-spring: ease-out; }
   }
 
-  /* phones (portrait): the same parts stacked at the bottom, tip first */
   @media (max-width: 600px) {
     #kr-loading { --tu: min(calc(100vw / 500), 0.9px); }
     #kr-loading .logo { left: 16px; top: 20px; width: calc(260 * var(--tu)); }
@@ -334,30 +369,16 @@
   </div>
 </div>
 <script>
-  // Loading screen (gameplay; Toon). Progress = main.ts's cost-weighted __kr.progress ("loading progress, weighted by
-  // measured cost"), fed with the game's own sub-steps (__kr.gameProgress / gameStage from client/src/game/index.ts).
-  // The phase and % update SYNCHRONOUSLY when main.ts / the game set a stage (setters on __kr.stage / gameStage /
-  // progressTo), so the text painted before a long blocking build is that build's own name, never the previous one's;
-  // every painted frame also refreshes them. Between updates the bar rides the current step's
-  // time estimate on the compositor (main.ts: progressFrom at progressAt, progressRate per ms, up to progressTo: the same
-  // line __kr.progress uses), so it keeps moving while a build blocks the main thread and never shows more than the %.
-  // Tip and controls keycaps come from the saved bindings (kr-preferences-v1, settings/preferences.ts) before any module
-  // loads; client/src/ui/loading-keys.ts then hands over the game's own labels (settings/labels.ts bindingText).
-  // ?view=ui-04-loading keeps the overlay in a frozen mid-load state for screenshot captures.
-  // ?loadinghold (dev, captures): the screen stays up at 100 % after ready; __krLoading.release() fades it into the title.
   (function () {
     var q = new URLSearchParams(location.search), el = document.getElementById("kr-loading");
     var demo = q.get("view") === "ui-04-loading", devHold = q.has("loadinghold");
     if (!demo && (q.has("view") || q.has("cam") || q.has("shot"))) { el.remove(); return; }
-    // (preload both faces of the game's canvas lettering)
-    try { document.fonts.load("900 1em 'KR Block'"); document.fonts.load("800 1em 'Barlow Condensed'"); } catch (e) { /* no FontFaceSet */ }
+    try { document.fonts.load("900 1em 'KR Block'"); document.fonts.load("800 1em 'Barlow Condensed'"); } catch (e) {}
     function $(s) { return el.querySelector(s); }
     var bar = $(".bar i"), barBox = $(".bar"), pct = $(".pct"), stage = $(".stage"), tipEl = $(".tip"), tipBody = $(".tip-body"), dashes = $(".dashes");
     var learn = $(".learn"), guide = $(".guide"), rows = $(".guide .rows"), closeBtn = $(".guide .close"), failure = $(".failure"), retry = $(".failure button");
 
-    // ---- the saved bindings + reduced motion (settings/preferences.ts normalizePreferences, binds part; any invalid
-    // record falls back to the defaults, exactly like the game)
-    var DEFAULT_BINDS = {   // = settings/bindings.ts DEFAULT_BINDS (loading-keys.ts warns in dev when they drift)
+    var DEFAULT_BINDS = {
       fwd: ["KeyW", "ArrowUp"], back: ["KeyS", "ArrowDown"], left: ["KeyA", "ArrowLeft"], right: ["KeyD", "ArrowRight"],
       jump: ["Space"], crouch: ["KeyC", "ShiftRight"], sprint: ["ShiftLeft"], reload: ["KeyR"], use: ["KeyE", "KeyF"],
       fire: ["Mouse0"], aim: ["Mouse2"], nextSlot: ["WheelDown"], prevSlot: ["WheelUp"], lastSlot: ["KeyQ"],
@@ -368,7 +389,7 @@
     var VALID = /^(Key[A-Z]|Digit[0-9]|Arrow(Up|Down|Left|Right)|Space|Tab|Shift(Left|Right)|Control(Left|Right)|Alt(Left|Right)|F[1-4]|Backquote|Bracket(Left|Right)|Backslash|Semicolon|Quote|Comma|Period|Minus|Equal|Mouse[0-4]|Wheel(Up|Down))$/;
     function bindCount(a) { return a === "slots" ? 5 : a === "seats" ? 3 : 2; }
     var binds = JSON.parse(JSON.stringify(DEFAULT_BINDS)), saved = null;
-    try { saved = JSON.parse(localStorage.getItem("kr-preferences-v1") || "null"); } catch (e) { /* private mode / bad JSON: defaults */ }
+    try { saved = JSON.parse(localStorage.getItem("kr-preferences-v1") || "null"); } catch (e) {}
     if (saved && typeof saved === "object") {
       if (saved.reducedMotion === true) el.classList.add("calm");
       var b = saved.binds;
@@ -387,13 +408,12 @@
     }
     var calm = el.classList.contains("calm") || (window.matchMedia && matchMedia("(prefers-reduced-motion: reduce)").matches);
     var MOUSE = ["Left mouse", "Middle mouse", "Right mouse", "Mouse 4", "Mouse 5"];
-    function bindLabel(code) {   // = settings/bindings.ts bindLabel
+    function bindLabel(code) {
       if (/^Mouse[0-4]$/.test(code)) return MOUSE[Number(code[5])];
       if (code === "WheelUp") return "Wheel up"; if (code === "WheelDown") return "Wheel down";
       return code.replace(/^Key/, "").replace(/^Digit/, "").replace(/^Arrow/, "Arrow ").replace("ShiftLeft", "Left Shift").replace("ShiftRight", "Right Shift")
         .replace("ControlLeft", "Left Ctrl").replace("ControlRight", "Right Ctrl").replace("AltLeft", "Left Alt").replace("AltRight", "Right Alt");
     }
-    // the hand-over point for client/src/ui/loading-keys.ts: keys(action) → every key of an action as the game labels it
     var hook = window.__krLoading = { defaults: DEFAULT_BINDS, keys: null, relabel: relabel, detach: null };
     function keysOf(a) {
       var list = null;
@@ -405,11 +425,9 @@
     function h(tag, cls, text) { var n = document.createElement(tag); if (cls) n.className = cls; if (text !== undefined) n.textContent = text; return n; }
     function kbd(text, accent) { return h("kbd", "key" + (text === "—" ? " unbound" : accent ? " accent" : ""), text); }
 
-    // ---- mode line: only what is actually known now (an invite link names its lobby; otherwise the game, not a mode)
     var join = (q.get("join") || "").toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, 8);
     $(".mode").textContent = join ? "Private lobby · Invite " + join : "Battle royale · 50 players";
 
-    // ---- tips: one at a time, every 3.2 s (paused while hovered or focused); click / Enter / Space shows the next
     var TIPS = [
       { eb: "Drop tip", keys: [["sprint", "Dive"], ["glider", "Glider"]], text: "In freefall, dive to land sooner, then open your glider." },
       { eb: "Movement tip", keys: [["sprint", "Sprint"], ["crouch", "Slide"]], text: "Crouch while sprinting to slide. Jump out to keep the speed." },
@@ -441,8 +459,6 @@
     tipEl.addEventListener("focus", function () { tipHold = true; });
     tipEl.addEventListener("blur", function () { tipHold = false; });
 
-    // ---- Learn controls: a quick card with the real bindings (the full guide lives in the game once it is ready). Loading
-    // carries on underneath; if the island is ready while the card is open, the screen waits until it is closed.
     var GUIDE = [["Move", ["fwd", "left", "back", "right"]], ["Sprint · dive", "sprint"], ["Crouch · slide", "crouch"], ["Jump · mantle", "jump"],
       ["Open · take", "use"], ["Reload", "reload"], ["Aim", "aim"], ["Fire · use item", "fire"], ["Item slots", "slots"], ["Throw banana bomb", "throw"],
       ["Map · place a pin", "map"], ["Inventory", "inventory"], ["Mark the spot", "ping"], ["Deploy glider", "glider"]];
@@ -474,7 +490,6 @@
     guide.addEventListener("click", function (e) { if (e.target === guide) closeGuide(); });
     function relabel() { renderTip(false); if (guideOpen) renderGuide(); }
 
-    // ---- keys while the screen is up: the open card (or the failure card) owns them, the game never sees them
     function onKey(e) {
       if (failed) { e.stopImmediatePropagation(); if (e.key === "Tab") { e.preventDefault(); retry.focus(); } return; }
       if (guideOpen) {
@@ -483,7 +498,6 @@
         return;
       }
       if (document.activeElement === tipEl && (e.key === "Enter" || e.key === " ")) { e.preventDefault(); e.stopImmediatePropagation(); nextTip(); }
-      // Tab moves between the screen's own two controls (the title is being built underneath, earlier in the page)
       if (e.key === "Tab" && !done) {
         e.preventDefault(); e.stopImmediatePropagation();
         var order = [learn, tipEl], at = order.indexOf(document.activeElement);
@@ -496,21 +510,14 @@
     var shown = 0, lastTo, lastPc = -1, lastLabel = "", t0 = performance.now(), done = false, held = false, failed = false, readyPainted = false, released = false;
     hook.release = function () { released = true; if (readyPainted && !guideOpen) fadeOut(); };
     if (demo) {
-      // capture frame: a representative mid-load state, no animation
       stage.textContent = "Growing the jungle"; pct.textContent = "64%"; bar.style.transform = "translateX(-36%)";
       el.classList.add("calm"); calm = true;
       return;
     }
     scheduleTip();
 
-    // ---- the bar: a short catch-up when the percentage jumps (a finished step, the game's next sub-step), then it rides
-    // this step's time estimate (main.ts: from progressFrom at progressAt, progressRate per ms, up to progressTo), holding
-    // still until that line passes it. The same line is the time term of __kr.progress, so the bar never shows more than
-    // the percentage. Web Animations: compositor-driven, it keeps moving while a build blocks the main thread.
     var seg = null, anim = null;
     function tx(f) { return "translateX(" + ((Math.min(1, Math.max(0, f)) - 1) * 100).toFixed(3) + "%)"; }
-    // where the bar is: wall-clock time since its animation started (the compositor keeps it moving while the main thread
-    // is blocked; until Chrome reports the compositor's start time, since it was created)
     function barAt(now) {
       if (!seg) return 0;
       var st = anim ? anim.startTime : null, dt = !anim ? Infinity : Math.max(0, now - (st === null || st === undefined ? seg.t0 : st));
@@ -518,12 +525,10 @@
       dt -= seg.snap + seg.hold;
       return dt <= 0 || !seg.glide ? seg.to : seg.to + (seg.end - seg.to) * Math.min(1, dt / seg.glide);
     }
-    /** where the bar is heading now (its catch-up target while it catches up) */
     function planned(now) { var at = barAt(now); return seg && at < seg.to ? seg.to : at; }
     function lineAt(line, t) { return Math.min(line.end, line.from + line.rate * Math.max(0, t - line.at)); }
     function moveBar(to, line) {
       var now = performance.now(), from = barAt(now), ok = line && line.rate > 0 && line.end > line.from;
-      // (a catch-up lands where the estimate will be when it ends, so the bar rides the line instead of trailing it)
       to = Math.max(from, to, ok ? lineAt(line, now + 180) : 0);
       var snap = to - from > 0.001 ? 180 : 0, hold = 0, glide = 0, end = to;
       if (ok && line.end > to + 0.0005) {
@@ -543,7 +548,7 @@
       anim = bar.animate(kf, { duration: total, easing: "linear" });
     }
 
-    function remove() { el.remove(); removeEventListener("keydown", onKey, true); try { if (hook.detach) hook.detach(); } catch (e) { /* the game's labels */ } window.__krLoading = undefined; }
+    function remove() { el.remove(); removeEventListener("keydown", onKey, true); try { if (hook.detach) hook.detach(); } catch (e) {} window.__krLoading = undefined; }
     function fadeOut() { if (devHold && !released) { held = true; return; } done = true; held = false; clearTimeout(tipTimer); el.classList.add("out"); setTimeout(remove, 800); }
     function fail() {
       if (done || failed) return;
@@ -553,14 +558,11 @@
       retry.addEventListener("click", function () { retry.disabled = true; location.reload(); });
       retry.focus();
     }
-    // the game code itself didn't load (a script fetch error), or it threw before main.ts set up window.__kr (its import
-    // graph failed to evaluate). From then on main.ts decides what is fatal (__kr.bootError): one POI throwing is not.
     addEventListener("error", function (e) { if (!done && ((e.target && e.target.tagName === "SCRIPT") || (!window.__kr && e.error))) fail(); }, true);
     addEventListener("unhandledrejection", function () { if (!done && !window.__kr) fail(); });
     var names = { boot: "Loading the island", terrain: "Raising the island", atmos: "Painting the sky", water: "Filling the lagoon", veg: "Growing the jungle",
       "lobby-islet": "Building the lobby island", afterBuild: "Settling the sand", showcase: "Waking the Kongs", "weapons-showcase": "Peeling the bananas",
       "gameplay-stage": "Loading the island", game: "Waking the Kongs", settle: "Almost there", ready: "Ready" };
-    // the game's own boot steps (client/src/game/index.ts gameStage)
     var gameNames = { world: "Building the collision world", kits: "Unpacking the crates", "prewarm:assets": "Stocking the chests",
       "prewarm:compile": "Warming up the shaders", "prewarm:compile-wait": "Warming up the shaders", "prewarm:frames": "Waking the Kongs",
       "prewarm:kongs": "Waking the Kongs", "prewarm:stage": "Stocking the chests", "prewarm:look-around": "Waking the Kongs",
@@ -574,7 +576,7 @@
       if (st.indexOf("poi:") < 0) return names.boot;
       return "Building " + id.split("-").map(function (w) { return w.charAt(0).toUpperCase() + w.slice(1); }).join(" ");
     }
-    window.__krLoadingLabel = label;   // automated load probes check every painted frame against it
+    window.__krLoadingLabel = label;
     function paint() {
       if (done) return;
       var kr = window.__kr || {};
@@ -593,7 +595,6 @@
         if (pc !== lastPc) pct.textContent = pc + "%";
         lastPc = pc; lastLabel = l; barBox.setAttribute("aria-valuenow", String(pc)); barBox.setAttribute("aria-valuetext", pc + "%, " + l);
       }
-      // (still not ready 2 minutes in, with errors: the boot is stuck — the reload card, not a half-built title)
       if (!ready && kr.errors && kr.errors.length && performance.now() - t0 > 120000) { fail(); return; }
       if (ready) {
         readyPainted = true;
@@ -601,18 +602,14 @@
         fadeOut();
       }
     }
-    // synchronous hooks: main.ts creates window.__kr and then sets .stage / .progressTo, the game sets .gameStage, right
-    // before each long step → repaint the label + % in that same task (the browser paints them at the step's next yield)
     function hookKr(kr) {
       ["stage", "gameStage", "progressTo", "ready", "bootError"].forEach(function (key) {
         var v = kr[key];
-        Object.defineProperty(kr, key, { configurable: true, enumerable: true, get: function () { return v; }, set: function (nv) { v = nv; try { paint(); } catch (e) { /* never break the boot */ } } });
+        Object.defineProperty(kr, key, { configurable: true, enumerable: true, get: function () { return v; }, set: function (nv) { v = nv; try { paint(); } catch (e) {} } });
       });
     }
     var krObj;
     Object.defineProperty(window, "__kr", { configurable: true, enumerable: true, get: function () { return krObj; }, set: function (o) { krObj = o; if (o && typeof o === "object") hookKr(o); paint(); } });
-    // every painted frame carries a fresh % (a build's time slices can starve the timer while frames still paint), and the
-    // timer covers a hidden tab (no frames)
     (function frame() { paint(); if (!done || held) requestAnimationFrame(frame); })();
     (function poll() { paint(); if (!done || held) setTimeout(poll, 100); })();
   })();
