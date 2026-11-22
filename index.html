@@ -14,17 +14,28 @@
     window.__KR_IS_TOUCH__ = realTouch;
     if (!realTouch) return;
 
+    // ۱. غیرفعال کردن قفل موبایل در حافظه بازی
     try {
       var flags = new URLSearchParams(localStorage.getItem('kr.flags') || '');
       flags.set('mobile', '0');
       localStorage.setItem('kr.flags', flags.toString());
     } catch (e) {}
 
+    // ۲. قفل کردن تراکم پیکسلی روی 1 برای کاهش شدید مصرف رم گرافیکی و جلوگیری از کرش iOS
+    try {
+      Object.defineProperty(window, 'devicePixelRatio', {
+        get: function () { return 1; },
+        configurable: true
+      });
+    } catch (e) {}
+
+    // ۳. جعل مشخصات مرورگر دسکتاپ و محدود کردن پردازش موازی برای جلوگیری از جهش ناگهانی رم
     var navOverrides = {
       userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
       platform: 'Win32',
       vendor: 'Google Inc.',
-      maxTouchPoints: 0
+      maxTouchPoints: 0,
+      hardwareConcurrency: 2
     };
     for (var key in navOverrides) {
       try {
@@ -33,6 +44,33 @@
       } catch (e) {}
     }
 
+    // ۴. بهینه‌سازی اجباری WebGL (خاموش کردن MSAA و محدود کردن ابعاد سایه و تکسچر به 1024 پیکسل)
+    var origGetContext = HTMLCanvasElement.prototype.getContext;
+    HTMLCanvasElement.prototype.getContext = function (type, attrs) {
+      if (type === 'webgl' || type === 'webgl2' || type === 'experimental-webgl') {
+        var safeAttrs = Object.assign({}, attrs || {}, {
+          antialias: false,
+          powerPreference: 'low-power',
+          preserveDrawingBuffer: false
+        });
+        var gl = origGetContext.call(this, type, safeAttrs);
+        if (gl && !gl.__krPatched) {
+          gl.__krPatched = true;
+          var origGetParam = gl.getParameter.bind(gl);
+          gl.getParameter = function (pname) {
+            if (pname === 0x0D33 || pname === 0x84E8) {
+              var realMax = origGetParam(pname);
+              return Math.min(realMax || 1024, 1024);
+            }
+            return origGetParam(pname);
+          };
+        }
+        return gl;
+      }
+      return origGetContext.call(this, type, attrs);
+    };
+
+    // ۵. دور زدن بررسی‌های CSS/JS مربوط به نمایشگر لمسی
     if (window.matchMedia) {
       var origMM = window.matchMedia.bind(window);
       window.matchMedia = function (q) {
